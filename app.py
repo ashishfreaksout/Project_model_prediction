@@ -1,3 +1,4 @@
+import os
 import uuid
 from flask import Flask, request, jsonify, send_from_directory
 import pandas as pd
@@ -36,7 +37,6 @@ def upload_file():
         return jsonify({"error": f"Error reading CSV: {str(e)}"}), 400
 
     session_id = str(uuid.uuid4())
-
     # Basic preview
     columns = list(df.columns)
     row_count, col_count = df.shape
@@ -167,4 +167,8 @@ def predict():
         return jsonify({"error": str(e)}), 400
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5001)
+    app.run(
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "5001")),
+        debug=os.getenv("FLASK_DEBUG", "0") == "1",
+    )
