@@ -11,7 +11,7 @@ import pandas as pd
 from scipy import sparse
 from scipy.stats import skew
 from sklearn.base import clone
-from sklearn.compose import ColumnTransformer
+from sklearn.compose import ColumnTransformer, TransformedTargetRegressor
 from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.ensemble import (
     GradientBoostingClassifier,
@@ -85,6 +85,7 @@ class AutomatedML:
         self.recommendations: List[str] = []
         self.target_summary: Dict[str, Any] = {}
         self.training_profile: Dict[str, Any] = {}
+        self.use_log_target: bool = False
 
         self.X_train = None
         self.X_test = None
@@ -102,6 +103,16 @@ class AutomatedML:
         self.target = target_column
         self.task_type = self._infer_task_type(self.df[target_column])
         self.target_summary = self._build_target_summary(self.df[target_column])
+        self.use_log_target = False
+
+    def set_training_options(self, use_log_target: bool = False):
+        should_use = bool(use_log_target)
+        if self.task_type != "regression":
+            self.use_log_target = False
+            return
+        if should_use and not self.target_summary.get("log_transform_supported", False):
+            raise ValueError("Log target transform is only available for non-negative regression targets.")
+        self.use_log_target = should_use
 
     def get_dataset_summary(self) -> Dict[str, Any]:
         return {
@@ -182,8 +193,8 @@ class AutomatedML:
                 # Log-transformed histogram for skewed targets
                 try:
                     sk_val = float(skew(non_null, nan_policy="omit"))
-                    if abs(sk_val) > 1.5:
-                        log_vals = np.log1p(non_null[non_null >= 0])
+                    if abs(sk_val) > 1.5 and float(non_null.min()) >= 0:
+                        log_vals = np.log1p(non_null)
                         if len(log_vals) > 10:
                             log_counts, log_bins = np.histogram(log_vals, bins=min(25, max(5, int(np.sqrt(len(log_vals))))))
                             eda["target_histogram_log"] = {
@@ -216,7 +227,7 @@ class AutomatedML:
                 # Skewness warning
                 try:
                     sk = float(skew(non_null, nan_policy="omit"))
-                    if abs(sk) > 2.0:
+                    if abs(sk) > 2.0 and float(non_null.min()) >= 0:
                         eda["warnings"].append({"type": "skewness", "severity": "warning", "message": f"Target is highly skewed (skewness = {sk:.2f}). A log transform may improve model performance."})
                 except Exception:
                     pass
@@ -269,7 +280,7 @@ class AutomatedML:
 
         for name, model in model_defs.items():
             try:
-                model_for_cv = clone(model)
+                model_for_cv = self._wrap_model_for_training(clone(model))
 
                 cv_result = cross_validate(
                     model_for_cv,
@@ -284,7 +295,7 @@ class AutomatedML:
 
                 summary = self._summarize_cv_metrics(cv_result)
 
-                fitted_model = clone(model)
+                fitted_model = self._wrap_model_for_training(clone(model))
                 fitted_model.fit(self.X_train_transformed, y_train_eval)
                 self.models[name] = fitted_model
 
@@ -342,6 +353,7 @@ class AutomatedML:
             "task_type": self.task_type,
             "cv_metrics": result.get("cv_metrics", {}),
             "holdout_metrics": result.get("test_metrics", {}),
+            "target_transform": "log1p" if self.use_log_target else "none",
             "reason": self._build_best_model_reason(),
             "warnings": self.dataset_warnings,
             "recommendations": self.recommendations,
@@ -351,7 +363,7 @@ class AutomatedML:
         if self.best_model is None:
             return {}
 
-        model = self.best_model
+        model = self._unwrap_model(self.best_model)
         importance = None
 
         if hasattr(model, "feature_importances_"):
@@ -365,6 +377,96 @@ class AutomatedML:
 
         ranked = sorted(zip(self.feature_names, importance), key=lambda x: x[1], reverse=True)[:top_n]
         return {k: float(v) for k, v in ranked}
+
+    def get_source_feature_importance(self) -> Dict[str, float]:
+        if self.best_model is None or self.X_train is None:
+            return {}
+
+        model = self._unwrap_model(self.best_model)
+        importance = None
+        if hasattr(model, "feature_importances_"):
+            importance = np.asarray(model.feature_importances_, dtype=float)
+        elif hasattr(model, "coef_"):
+            coef = np.asarray(model.coef_, dtype=float)
+            importance = np.abs(coef[0]) if coef.ndim > 1 else np.abs(coef)
+
+        if importance is None or len(importance) != len(self.feature_names):
+            return {}
+
+        source_columns = sorted(self.X_train.columns.tolist(), key=len, reverse=True)
+        grouped: Dict[str, float] = {col: 0.0 for col in self.X_train.columns.tolist()}
+
+        for feature_name, score in zip(self.feature_names, importance):
+            source = next(
+                (col for col in source_columns if feature_name == col or feature_name.startswith(f"{col}_")),
+                feature_name,
+            )
+            grouped[source] = grouped.get(source, 0.0) + float(score)
+
+        return dict(sorted(grouped.items(), key=lambda item: item[1], reverse=True))
+
+    def get_prediction_schema(self, top_n: int = 10, max_dropdown_options: int = 12) -> Dict[str, Any]:
+        if self.best_model is None or self.X_train is None or self.column_roles is None:
+            return {}
+
+        used_columns = self.X_train.columns.tolist()
+        source_importance = self.get_source_feature_importance()
+        ranked_columns = sorted(
+            used_columns,
+            key=lambda col: (source_importance.get(col, 0.0), -used_columns.index(col)),
+            reverse=True,
+        )
+        key_inputs = ranked_columns[: min(top_n, len(ranked_columns))]
+
+        fields: List[Dict[str, Any]] = []
+        for rank, col in enumerate(ranked_columns, start=1):
+            series = self.X_train[col]
+            non_null = series.dropna()
+            is_numeric = col in self.column_roles.numeric
+            default_value = None if non_null.empty else non_null.median() if is_numeric else non_null.mode().iloc[0]
+            value_type = "number" if pd.api.types.is_numeric_dtype(series) else "boolean" if pd.api.types.is_bool_dtype(series) else "string"
+            unique_count = int(non_null.nunique(dropna=True))
+
+            if is_numeric:
+                kind = "number"
+                options: List[Dict[str, Any]] = []
+            else:
+                option_values = non_null.value_counts(dropna=True).head(max_dropdown_options).index.tolist()
+                if 0 < unique_count <= max_dropdown_options:
+                    kind = "select"
+                    options = [
+                        {"label": str(value), "value": self._to_json_scalar(value)}
+                        for value in option_values
+                    ]
+                else:
+                    kind = "text"
+                    options = []
+
+            fields.append({
+                "name": col,
+                "label": col.replace("_", " "),
+                "kind": kind,
+                "value_type": value_type,
+                "default_value": self._to_json_scalar(default_value),
+                "default_label": "median" if is_numeric else "most frequent",
+                "options": options,
+                "is_key": col in key_inputs,
+                "importance": float(source_importance.get(col, 0.0)),
+                "rank": rank,
+                "is_optional": True,
+            })
+
+        return {
+            "used_columns": used_columns,
+            "key_inputs": key_inputs,
+            "excluded_columns": self.column_roles.dropped,
+            "fields": fields,
+            "supports_partial_input": True,
+            "notes": [
+                "Only model-used inputs are shown.",
+                "Fields left blank will fall back to the training pipeline defaults or imputers.",
+            ],
+        }
 
     def get_evaluation_charts(self) -> Dict[str, Any]:
         charts: Dict[str, Any] = {}
@@ -468,12 +570,15 @@ class AutomatedML:
                     summary["skewness"] = float(skew(clean, nan_policy="omit"))
                 except Exception:
                     summary["skewness"] = None
+                summary["log_transform_supported"] = bool(float(clean.min()) >= 0)
                 # Outlier detection via IQR
                 q1, q3 = float(clean.quantile(0.25)), float(clean.quantile(0.75))
                 iqr = q3 - q1
                 outlier_count = int(((clean < q1 - 1.5 * iqr) | (clean > q3 + 1.5 * iqr)).sum())
                 summary["outlier_count"] = outlier_count
-                summary["log_transform_suggested"] = abs(summary.get("skewness", 0) or 0) > 2.0
+                summary["log_transform_suggested"] = (
+                    summary["log_transform_supported"] and abs(summary.get("skewness", 0) or 0) > 2.0
+                )
             else:
                 summary.update({
                     "mean": None,
@@ -487,6 +592,7 @@ class AutomatedML:
                     "p99": None,
                     "skewness": None,
                     "outlier_count": 0,
+                    "log_transform_supported": False,
                     "log_transform_suggested": False,
                 })
         return summary
@@ -499,8 +605,11 @@ class AutomatedML:
         plan = {}
         
         # Target transform
-        if self.task_type == "regression" and self.target_summary.get("log_transform_suggested"):
-            plan["target_transform"] = "Log transform recommended due to high skewness"
+        if self.task_type == "regression":
+            if self.use_log_target:
+                plan["target_transform"] = "Applying log1p transform to the target during training; metrics are reported on the original scale"
+            elif self.target_summary.get("log_transform_suggested"):
+                plan["target_transform"] = "Log transform recommended due to high skewness"
         
         # Downsampling
         if total > 15000:
@@ -559,6 +668,16 @@ class AutomatedML:
         non_null = series.dropna()
         if len(non_null) == 0:
             return False
+        if pd.api.types.is_numeric_dtype(non_null):
+            values = pd.to_numeric(non_null, errors="coerce").dropna()
+            if values.empty:
+                return False
+            if not np.allclose(values.to_numpy(), np.round(values.to_numpy())):
+                return False
+            return (
+                values.nunique() / len(values) > 0.98
+                and (values.is_monotonic_increasing or values.is_monotonic_decreasing)
+            )
         unique_ratio = non_null.nunique() / len(non_null)
         return unique_ratio > 0.98
 
@@ -570,7 +689,7 @@ class AutomatedML:
         sample = series.dropna().astype(str).head(50)
         if sample.empty:
             return False
-        parsed = pd.to_datetime(sample, errors="coerce", infer_datetime_format=True)
+        parsed = pd.to_datetime(sample, errors="coerce")
         return parsed.notna().mean() >= 0.8
 
     def _looks_like_long_text(self, series: pd.Series) -> bool:
@@ -896,8 +1015,12 @@ class AutomatedML:
             details.append(f"holdout R² was {holdout_r2:.3f}")
         detail_text = ", ".join(details)
         if detail_text:
-            return f"{self.best_model_name} was selected because it ranked highest on cross-validated R². {detail_text}."
-        return f"{self.best_model_name} was selected because it ranked highest on cross-validated R²."
+            reason = f"{self.best_model_name} was selected because it ranked highest on cross-validated R². {detail_text}."
+        else:
+            reason = f"{self.best_model_name} was selected because it ranked highest on cross-validated R²."
+        if self.use_log_target:
+            reason += " Training used log1p(target), while reported metrics remain on the original target scale."
+        return reason
 
     def _build_recommendations(self) -> List[str]:
         recs: List[str] = []
@@ -917,6 +1040,10 @@ class AutomatedML:
                 "High numbers of categorical variables can increase sparsity. Consider grouping rare categories or using target/frequency encoding in a future version."
             )
         if self.task_type == "regression":
+            if self.use_log_target:
+                recs.append(
+                    "The target was trained with log1p scaling, which is often useful for positive, right-skewed regression targets."
+                )
             recs.append(
                 "For regression, compare residual plots and consider log-transforming a heavily skewed target if appropriate."
             )
@@ -932,3 +1059,27 @@ class AutomatedML:
             if col not in input_df.columns:
                 input_df[col] = np.nan
         return input_df[expected_cols]
+
+    def _to_json_scalar(self, value: Any) -> Any:
+        if value is None or (isinstance(value, float) and np.isnan(value)):
+            return None
+        if pd.isna(value):
+            return None
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, pd.Timestamp):
+            return value.isoformat()
+        return value
+
+    def _wrap_model_for_training(self, model):
+        if self.task_type == "regression" and self.use_log_target:
+            return TransformedTargetRegressor(
+                regressor=model,
+                func=np.log1p,
+                inverse_func=np.expm1,
+                check_inverse=False,
+            )
+        return model
+
+    def _unwrap_model(self, model):
+        return getattr(model, "regressor_", getattr(model, "regressor", model))

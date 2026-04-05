@@ -116,6 +116,7 @@ let datasetCols = [];
 let datasetTypes = {};
 let taskType = null;
 let charts = {};
+let predictionSchema = null;
 
 // DOM Elements
 const sections = {
@@ -198,6 +199,30 @@ function showSection(sectionId) {
     sections[sectionId].classList.remove('hidden');
     // Scroll top
     window.scrollTo({top: 0, behavior: 'smooth'});
+}
+
+function updateLogTransformOption(targetSummary = {}, currentTaskType = null) {
+    const optionEl = document.getElementById('log-transform-option');
+    const checkbox = document.getElementById('use-log-target');
+    const helpEl = document.getElementById('log-transform-help');
+    if (!optionEl || !checkbox || !helpEl) return;
+
+    const supported = Boolean(targetSummary?.log_transform_supported);
+    const suggested = Boolean(targetSummary?.log_transform_suggested);
+
+    if (currentTaskType === 'regression' && supported) {
+        optionEl.classList.remove('hidden');
+        checkbox.disabled = false;
+        checkbox.checked = suggested;
+        helpEl.innerText = suggested
+            ? 'Recommended for this target because it is positive and highly right-skewed. Metrics remain reported on the original target scale.'
+            : 'Optional for positive regression targets. Use this when reducing right-skew and large-value compression is more important than fitting on the raw scale.';
+        return;
+    }
+
+    checkbox.checked = false;
+    checkbox.disabled = true;
+    optionEl.classList.add('hidden');
 }
 
 document.getElementById('brand-home').addEventListener('click', () => {
@@ -462,6 +487,8 @@ document.getElementById('btn-analyze').addEventListener('click', async () => {
         } else {
             recEl.classList.add('hidden');
         }
+
+        updateLogTransformOption(ts, taskType);
         
         // --- Data Quality Warnings ---
         const warnContainer = document.getElementById('warnings-container');
@@ -566,6 +593,134 @@ function setChartBodyMinHeight(canvasId, minHeight) {
     const body = canvas?.closest('.chart-card-body');
     if (!body) return;
     body.style.minHeight = `${Math.round(minHeight)}px`;
+}
+
+function formatPredictionDefaultValue(value) {
+    if (value == null || value === '') return 'blank';
+    if (typeof value === 'number') {
+        return Number.isInteger(value) ? `${value}` : Number(value).toFixed(Math.abs(value) >= 100 ? 0 : 2);
+    }
+    return String(value);
+}
+
+function coercePredictionFieldValue(field, rawValue) {
+    if (rawValue == null) return undefined;
+    const text = String(rawValue).trim();
+    if (text === '') return undefined;
+
+    if (field.value_type === 'boolean') {
+        return text === 'true';
+    }
+    if (field.value_type === 'number') {
+        const numeric = Number(text);
+        return Number.isFinite(numeric) ? numeric : undefined;
+    }
+    return rawValue;
+}
+
+function createPredictionInput(field) {
+    const group = document.createElement('div');
+    group.className = 'input-group';
+
+    const label = document.createElement('label');
+    label.setAttribute('for', `input-${field.name}`);
+    label.innerText = field.name;
+
+    const hint = document.createElement('span');
+    hint.className = 'field-hint';
+    hint.innerText = `Optional. Blank uses ${field.default_label} (${formatPredictionDefaultValue(field.default_value)}).`;
+
+    let control;
+    if (field.kind === 'select') {
+        control = document.createElement('select');
+        const blankOption = document.createElement('option');
+        blankOption.value = '';
+        blankOption.innerText = `Use default (${formatPredictionDefaultValue(field.default_value)})`;
+        control.appendChild(blankOption);
+        field.options.forEach(option => {
+            const optionEl = document.createElement('option');
+            optionEl.value = String(option.value);
+            optionEl.innerText = option.label;
+            control.appendChild(optionEl);
+        });
+    } else {
+        control = document.createElement('input');
+        control.type = field.kind === 'number' ? 'number' : 'text';
+        if (field.kind === 'number') control.step = 'any';
+        control.placeholder = `Default: ${formatPredictionDefaultValue(field.default_value)}`;
+    }
+
+    control.name = field.name;
+    control.id = `input-${field.name}`;
+    control.dataset.valueType = field.value_type;
+    control.dataset.kind = field.kind;
+
+    group.appendChild(label);
+    group.appendChild(control);
+    group.appendChild(hint);
+    return group;
+}
+
+function renderPredictionForm(schema) {
+    const form = document.getElementById('prediction-form');
+    const summary = document.getElementById('prediction-form-summary');
+    form.innerHTML = '';
+
+    if (!schema || !Array.isArray(schema.fields) || !schema.fields.length) {
+        form.innerHTML = '<div class="chart-empty-state">Prediction inputs are not available for this trained model.</div>';
+        summary.classList.add('hidden');
+        summary.innerHTML = '';
+        return;
+    }
+
+    const keyFields = schema.fields.filter(field => field.is_key);
+    const advancedFields = schema.fields.filter(field => !field.is_key);
+
+    summary.classList.remove('hidden');
+    summary.innerHTML = `
+        <div class="prediction-summary-grid">
+            <div class="prediction-summary-card">
+                <span class="prediction-summary-label">Key Inputs</span>
+                <strong class="prediction-summary-value">${keyFields.length}</strong>
+            </div>
+            <div class="prediction-summary-card">
+                <span class="prediction-summary-label">Advanced Inputs</span>
+                <strong class="prediction-summary-value">${advancedFields.length}</strong>
+            </div>
+            <div class="prediction-summary-card">
+                <span class="prediction-summary-label">Excluded Columns</span>
+                <strong class="prediction-summary-value">${(schema.excluded_columns || []).length}</strong>
+            </div>
+        </div>
+        <p class="prediction-form-note">Only model-used fields are shown. Key inputs are ranked by model influence when available. Low-cardinality categorical variables are rendered as dropdowns, and blank fields fall back to training defaults or imputers.</p>
+    `;
+
+    const keySection = document.createElement('div');
+    keySection.className = 'prediction-form-section';
+    keySection.innerHTML = '<div class="prediction-section-head"><h3>Key Inputs</h3><span class="prediction-section-note">Most influential model inputs</span></div>';
+    const keyGrid = document.createElement('div');
+    keyGrid.className = 'prediction-grid-inner';
+    keyFields.forEach(field => keyGrid.appendChild(createPredictionInput(field)));
+    keySection.appendChild(keyGrid);
+    form.appendChild(keySection);
+
+    if (advancedFields.length > 0) {
+        const advancedSection = document.createElement('details');
+        advancedSection.className = 'prediction-advanced';
+        advancedSection.innerHTML = `
+            <summary>Additional Optional Inputs <span>${advancedFields.length} field(s)</span></summary>
+        `;
+        const advancedGrid = document.createElement('div');
+        advancedGrid.className = 'prediction-grid-inner';
+        advancedFields.forEach(field => advancedGrid.appendChild(createPredictionInput(field)));
+        advancedSection.appendChild(advancedGrid);
+        form.appendChild(advancedSection);
+    }
+
+    const btnGroup = document.createElement('div');
+    btnGroup.className = 'prediction-submit-row';
+    btnGroup.innerHTML = '<button type="submit" class="btn btn-primary">Predict Now</button>';
+    form.appendChild(btnGroup);
 }
 
 function getSignedCorrelationEntries(edaData, targetCol) {
@@ -929,6 +1084,7 @@ function setHistToggleState(active) {
 
 // 3. Train Models
 document.getElementById('btn-train').addEventListener('click', async () => {
+    const useLogTransform = Boolean(document.getElementById('use-log-target')?.checked);
     const defaultTrainingModels = taskType === 'classification'
         ? ['Logistic Regression', 'Decision Tree', 'Random Forest', 'Gradient Boosting', 'XGBoost']
         : ['Linear Regression', 'Ridge Regression', 'Decision Tree', 'Random Forest', 'Gradient Boosting', 'XGBoost'];
@@ -942,7 +1098,9 @@ document.getElementById('btn-train').addEventListener('click', async () => {
     ];
 
     showLoader(taskType === 'classification' ? 'Training Classification Models' : 'Training Regression Models', {
-        detail: 'Launching the training pipeline.',
+        detail: useLogTransform && taskType === 'regression'
+            ? 'Launching the training pipeline with log1p(target) enabled.'
+            : 'Launching the training pipeline.',
         cycle: trainingCycle
     });
     
@@ -950,7 +1108,7 @@ document.getElementById('btn-train').addEventListener('click', async () => {
         const res = await fetch('/api/train', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ session_id: sessionId })
+            body: JSON.stringify({ session_id: sessionId, use_log_transform: useLogTransform })
         });
         
         let data;
@@ -1115,6 +1273,9 @@ function buildRangeErrorBands(scatterData, bandCount = 5) {
 function buildSummaryPoints(bestName, improvement, featureImportance, bestModelInfo) {
     const points = [];
     points.push(`<div class="summary-point"><strong>${bestName}</strong> delivered the strongest cross-validated performance in the benchmark set and was selected as the production candidate.</div>`);
+    if (bestModelInfo?.target_transform === 'log1p') {
+        points.push('<div class="summary-point"><strong>Target transform:</strong> training used log1p(target) to stabilize a skewed positive target, while evaluation metrics were converted back to the original scale.</div>');
+    }
     if (improvement?.text && improvement.text !== '—') {
         points.push(`<div class="summary-point"><strong>Baseline Lift:</strong> ${improvement.text} improvement. <span>${improvement.detail}</span></div>`);
     }
@@ -1142,6 +1303,9 @@ function buildInterpretationItems(bestName, bestRow, baselineRow, featureImporta
         const lift = bestR2 - baselineR2;
         items.push(`<div class="interpretation-item"><strong>Baseline comparison:</strong> the selected model improved R² by ${lift.toFixed(3)} over the mean baseline.</div>`);
     }
+    if (lastTrainResultsData?.best_model?.target_transform === 'log1p') {
+        items.push('<div class="interpretation-item"><strong>Training setup:</strong> the model was fit on log1p(target), which is often advisable for positive, right-skewed regression targets with large outliers.</div>');
+    }
     const topFeatures = Object.entries(featureImportance || {}).slice(0, 5);
     if (topFeatures.length > 0) {
         items.push(`<div class="interpretation-item"><strong>Prediction drivers:</strong> ${topFeatures.map(([name]) => name).join(', ')} are the strongest model signals in this run.</div>`);
@@ -1156,6 +1320,7 @@ function buildInterpretationItems(bestName, bestRow, baselineRow, featureImporta
 
 function renderResultsList(data) {
     lastTrainResultsData = data;
+    predictionSchema = data.prediction_schema || null;
     const theme = getThemeTokens();
 
     const bestModelInfo = data.best_model || {};
@@ -1556,60 +1721,28 @@ document.getElementById('btn-download-results').addEventListener('click', () => 
 
 // 4. Manual Prediction Setup
 document.getElementById('btn-go-predict').addEventListener('click', () => {
-    // Build form dynamically
-    const target = document.getElementById('target-select').value;
-    const form = document.getElementById('prediction-form');
-    form.innerHTML = '';
-    
-    datasetCols.forEach(col => {
-        if (col === target) return; 
-        
-        const group = document.createElement('div');
-        group.className = 'input-group';
-        
-        const label = document.createElement('label');
-        label.innerText = col;
-        
-        const input = document.createElement('input');
-        input.name = col;
-        input.id = `input-${col}`;
-        
-        // guess type
-        if (datasetTypes[col] && datasetTypes[col].includes('float') || datasetTypes[col].includes('int')) {
-            input.type = 'number';
-            input.step = 'any';
-            input.value = 0;
-        } else {
-            input.type = 'text';
-            input.value = "Category";
-        }
-        
-        group.appendChild(label);
-        group.appendChild(input);
-        form.appendChild(group);
-    });
-    
-    // Add submit button
-    const btnGroup = document.createElement('div');
-    btnGroup.className = 'input-group';
-    btnGroup.innerHTML = `<label>&nbsp;</label><button type="submit" class="btn btn-primary" style="width:100%">Predict Now</button>`;
-    form.appendChild(btnGroup);
-    
+    renderPredictionForm(predictionSchema);
     showSection('predict');
 });
 
 // Predict Submit
 document.getElementById('prediction-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    
-    const formData = new FormData(e.target);
     const features = {};
-    for (let [key, value] of formData.entries()) {
-        if (datasetTypes[key].includes('float') || datasetTypes[key].includes('int')) {
-            features[key] = parseFloat(value) || 0;
-        } else {
-            features[key] = value;
+
+    const fields = predictionSchema?.fields || [];
+    fields.forEach(field => {
+        const el = document.getElementById(`input-${field.name}`);
+        if (!el) return;
+        const coerced = coercePredictionFieldValue(field, el.value);
+        if (coerced !== undefined) {
+            features[field.name] = coerced;
         }
+    });
+
+    if (Object.keys(features).length === 0) {
+        alert('Enter at least one value or choose a categorical option. Blank fields already fall back to defaults.');
+        return;
     }
     
     document.getElementById('prediction-output').innerHTML = '<span class="spinner" style="width:30px;height:30px;display:inline-block;border-width:3px;margin:0;"></span>';

@@ -130,6 +130,7 @@ def analyze_data():
 def train_models():
     data = request.json
     session_id = data.get("session_id")
+    use_log_transform = data.get("use_log_transform", False)
 
     if not session_id or session_id not in SESSION_STORE:
         return jsonify({"error": "Invalid session"}), 400
@@ -137,6 +138,7 @@ def train_models():
     engine = SESSION_STORE[session_id]["ml_engine"]
     
     try:
+        engine.set_training_options(use_log_target=use_log_transform)
         engine.train_all_models()
         results = engine.get_model_comparison()
         best_model_info = engine.get_best_model_info()
@@ -144,7 +146,8 @@ def train_models():
             "models": results,
             "best_model": best_model_info,
             "feature_importance": engine.get_feature_importance(),
-            "evaluation_charts": engine.get_evaluation_charts()
+            "evaluation_charts": engine.get_evaluation_charts(),
+            "prediction_schema": engine.get_prediction_schema(),
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 400

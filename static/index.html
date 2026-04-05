@@ -170,6 +170,15 @@
                             <span id="analysis-task-badge" style="display:inline-block; padding:0.2rem 0.6rem; background:var(--surface-primary-soft); border:1px solid var(--surface-primary-border); border-radius:6px; font-size:0.7rem; font-weight:600; color:var(--primary-strong); text-transform:uppercase; letter-spacing:0.5px; margin-left:0.75rem;">REGRESSION</span>
                         </p>
                         <p style="font-size:0.85rem; color:var(--text-secondary);"><span id="analysis-usable-rows">—</span> usable rows for training</p>
+                        <div id="log-transform-option" class="hidden" style="margin-top:0.9rem; padding:0.8rem 0.95rem; border-radius:12px; border:1px solid var(--surface-primary-border); background:var(--surface-primary-soft); max-width:560px;">
+                            <label style="display:flex; align-items:flex-start; gap:0.7rem; cursor:pointer;">
+                                <input id="use-log-target" type="checkbox" style="margin-top:0.15rem;">
+                                <span>
+                                    <span style="display:block; color:var(--text-primary); font-weight:600; font-size:0.9rem;">Train with log1p(target)</span>
+                                    <span id="log-transform-help" style="display:block; color:var(--text-secondary); font-size:0.8rem; line-height:1.5; margin-top:0.2rem;">Recommended for positive, highly right-skewed regression targets. Metrics remain reported on the original target scale.</span>
+                                </span>
+                            </label>
+                        </div>
                     </div>
                     <button class="btn btn-primary" id="btn-train" style="padding:1rem 2.5rem; font-size:1.05rem; font-weight:600;">Train Regression Models</button>
                 </div>
@@ -401,6 +410,7 @@
              <div class="glass-card">
                 <h2>Live Prediction Panel</h2>
                 <p class="subtitle">Simulate predictions natively using the trained <strong id="predict-model-name" class="gradient-text"></strong> model.</p>
+                <div id="prediction-form-summary" class="prediction-form-summary hidden"></div>
                 
                 <form id="prediction-form" class="prediction-grid mt-2">
                     <!-- Inputs injected here via JS -->
