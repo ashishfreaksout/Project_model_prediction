@@ -114,6 +114,19 @@ This project is strong when presented as:
 
 For interview-ready talking points, see [docs/INTERVIEW_GUIDE.md](./docs/INTERVIEW_GUIDE.md).
 
+## Screenshots
+
+Selected product screens are documented in [docs/SCREENSHOTS.md](./docs/SCREENSHOTS.md).
+
+### Results Dashboard
+
+![Results dashboard hero](./docs/screenshots/results-hero.png)
+
+### Analysis And Diagnostics
+
+![Analysis overview](./docs/screenshots/analysis-overview.png)
+![Target distribution and top correlations](./docs/screenshots/target-distribution-and-correlations.png)
+
 ## Project Structure
 
 ```text
@@ -131,7 +144,9 @@ For interview-ready talking points, see [docs/INTERVIEW_GUIDE.md](./docs/INTERVI
     ├── ARCHITECTURE.md
     ├── DEPLOYMENT.md
     ├── FAILURES_AND_FIXES.md
-    └── INTERVIEW_GUIDE.md
+    ├── INTERVIEW_GUIDE.md
+    ├── SCREENSHOTS.md
+    └── screenshots/
 ```
 
 ## Important Limitations
@@ -145,4 +160,3 @@ These tradeoffs are documented more fully in:
 - [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)
 - [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md)
 - [docs/FAILURES_AND_FIXES.md](./docs/FAILURES_AND_FIXES.md)
-
